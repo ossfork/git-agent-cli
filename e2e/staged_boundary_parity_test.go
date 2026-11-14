@@ -16,62 +16,65 @@ import (
 	"testing"
 )
 
-// These tests compare this branch with the develop revision, so the comparison is
-// a test rather than a note. The develop binary is built once from a detached
-// worktree of that revision and reused.
+// These tests compare this tree with the revision immediately before the
+// staged-boundary fix. The comparison is a test rather than a note. A moving
+// branch stopped representing the defect once the fix landed there, so the
+// baseline is pinned and built once in a detached worktree.
+const stagedBoundaryBaseline = "6c58d09" // parent of cdf55b0
 
 var (
-	developBinOnce sync.Once
-	developBin     string
-	developBinErr  error
+	baselineBinOnce sync.Once
+	baselineBin     string
+	baselineBinErr  error
 )
 
-// developBinary builds the develop revision and returns the binary path. It skips
-// when the revision is not available, which is what a shallow checkout sees.
-func developBinary(t *testing.T) string {
+// baselineBinary builds the pinned pre-fix baseline once and returns its binary
+// path. It skips when the revision is not available, which is what a shallow
+// checkout sees.
+func baselineBinary(t *testing.T) string {
 	t.Helper()
-	developBinOnce.Do(func() {
+	baselineBinOnce.Do(func() {
 		root, err := repoRootOf()
 		if err != nil {
-			developBinErr = fmt.Errorf("locating the repository: %w", err)
+			baselineBinErr = fmt.Errorf("locating the repository: %w", err)
 			return
 		}
-		if err := exec.Command("git", "-C", root, "rev-parse", "--verify", "develop").Run(); err != nil {
-			developBinErr = fmt.Errorf("the develop revision is not in this checkout")
+		if err := exec.Command("git", "-C", root, "rev-parse", "--verify", stagedBoundaryBaseline+"^{commit}").Run(); err != nil {
+			baselineBinErr = fmt.Errorf("the pre-fix baseline revision is not in this checkout")
 			return
 		}
-		dir, err := os.MkdirTemp("", "git-agent-develop-*")
+		dir, err := os.MkdirTemp("", "git-agent-baseline-*")
 		if err != nil {
-			developBinErr = err
+			baselineBinErr = err
 			return
 		}
 		// The binary is written outside the checkout, so the worktree can be
 		// removed again and the repository keeps no stale registration.
-		binDir, err := os.MkdirTemp("", "git-agent-develop-bin-*")
+		binDir, err := os.MkdirTemp("", "git-agent-baseline-bin-*")
 		if err != nil {
-			developBinErr = err
+			baselineBinErr = err
 			return
 		}
-		developBin = filepath.Join(binDir, "git-agent")
-		if out, err := runGitIn(root, "worktree", "add", "--detach", dir, "develop"); err != nil {
-			developBinErr = fmt.Errorf("worktree add: %v\n%s", err, out)
+		baselineBin = filepath.Join(binDir, "git-agent")
+		if out, err := runGitIn(root, "worktree", "add", "--detach", dir, stagedBoundaryBaseline); err != nil {
+			baselineBinErr = fmt.Errorf("worktree add: %v\n%s", err, out)
 			return
 		}
 		defer func() {
 			_, _ = runGitIn(root, "worktree", "remove", "--force", dir)
 			_ = os.RemoveAll(dir)
 		}()
-		build := exec.Command("go", "build", "-o", developBin, ".")
+		build := exec.Command("go", "build", "-o", baselineBin, ".")
 		build.Dir = dir
 		if out, err := build.CombinedOutput(); err != nil {
-			developBinErr = fmt.Errorf("building develop: %v\n%s", err, out)
+			baselineBinErr = fmt.Errorf("building pre-fix baseline: %v\n%s", err, out)
 			return
 		}
 	})
-	if developBinErr != nil {
-		t.Skipf("cannot compare with develop: %v", developBinErr)
+	if baselineBinErr != nil {
+		t.Skipf("cannot compare with the pre-fix baseline: %v", baselineBinErr)
 	}
-	return developBin
+	return baselineBin
 }
 
 func repoRootOf() (string, error) {
@@ -109,31 +112,31 @@ func runBinary(t *testing.T, bin, dir string, args ...string) (string, string, i
 	return stdout.String(), stderr.String(), code
 }
 
-// TestCommitCmd_StagedBoundary_DevelopAbsorbsWhatTheBranchKeepsApart is the
-// comparison this fix exists for, run against both binaries on the same fixture:
-// one region staged by hand, the other loose in the working tree.
-func TestCommitCmd_StagedBoundary_DevelopAbsorbsWhatTheBranchKeepsApart(t *testing.T) {
+// TestCommitCmd_StagedBoundary_BaselineAbsorbsWhatTheBranchKeepsApart is the
+// comparison this fix exists for: the pinned pre-fix baseline and this tree run
+// against the same fixture, with one region staged and the other loose.
+func TestCommitCmd_StagedBoundary_BaselineAbsorbsWhatTheBranchKeepsApart(t *testing.T) {
 	server := newFastLLMServer(t, 0)
 	defer server.Close()
-	develop := developBinary(t)
+	baseline := baselineBinary(t)
 
 	args := []string{"commit", "--api-key", "test-key", "--base-url", server.URL,
 		"--model", "test-model", "--no-stage"}
 
-	developDir, developPatch := stagedBoundaryRepo(t)
-	stagedBoundaryChange(t, developDir)
-	applyPatch(t, developDir, developPatch)
-	if _, stderr, code := runBinary(t, develop, developDir, args...); code != 0 {
-		t.Fatalf("the develop binary failed with %d:\n%s", code, stderr)
+	baselineDir, baselinePatch := stagedBoundaryRepo(t)
+	stagedBoundaryChange(t, baselineDir)
+	applyPatch(t, baselineDir, baselinePatch)
+	if _, stderr, code := runBinary(t, baseline, baselineDir, args...); code != 0 {
+		t.Fatalf("the baseline binary failed with %d:\n%s", code, stderr)
 	}
-	developHead := gitOutput(t, developDir, "show", "HEAD", "--", "app.go")
-	if !strings.Contains(developHead, "EPSILON") {
-		t.Fatalf("the fixture no longer reproduces the develop defect:\n%s", developHead)
+	baselineHead := gitOutput(t, baselineDir, "show", "HEAD", "--", "app.go")
+	if !strings.Contains(baselineHead, "EPSILON") {
+		t.Fatalf("the fixture no longer reproduces the baseline defect:\n%s", baselineHead)
 	}
-	if loose := gitOutput(t, developDir, "diff", "--name-only"); strings.TrimSpace(loose) != "" {
-		t.Fatalf("develop left work behind, so it did not absorb it:\n%s", loose)
+	if loose := gitOutput(t, baselineDir, "diff", "--name-only"); strings.TrimSpace(loose) != "" {
+		t.Fatalf("baseline left work behind, so it did not absorb it:\n%s", loose)
 	}
-	t.Logf("develop: the staged commit absorbed the unstaged region, and the working tree was left empty")
+	t.Logf("pre-fix baseline: the staged commit absorbed the unstaged region, and the working tree was left empty")
 
 	branchDir, branchPatch := stagedBoundaryRepo(t)
 	stagedBoundaryChange(t, branchDir)
@@ -153,28 +156,27 @@ func TestCommitCmd_StagedBoundary_DevelopAbsorbsWhatTheBranchKeepsApart(t *testi
 	}
 }
 
-// capturingStub records the request bodies it is asked to answer, so two runs can
-// be compared on the prompts they sent as well as on what they committed.
-type capturingStub struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	bodies []string
+// llmStub records the request bodies it is asked to answer, so two runs can be
+// compared on the prompts they sent as well as on what they committed. respond
+// builds the assistant reply for one request body.
+type llmStub struct {
+	server  *httptest.Server
+	mu      sync.Mutex
+	bodies  []string
+	respond func(body string) string
 }
 
-func newCapturingStub(t *testing.T) *capturingStub {
+func newLLMStub(t *testing.T, respond func(body string) string) *llmStub {
 	t.Helper()
-	stub := &capturingStub{}
+	stub := &llmStub{respond: respond}
 	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
+		body := string(raw)
 		stub.mu.Lock()
-		stub.bodies = append(stub.bodies, string(raw))
+		stub.bodies = append(stub.bodies, body)
 		stub.mu.Unlock()
 
-		content := `{"title":"feat(cli): initial commit","bullets":["Change the files"],"explanation":"Changes the files."}`
-		if strings.Contains(string(raw), "meaningful atomic commits") {
-			content = planFromPrompt(string(raw))
-		}
-		payload, _ := json.Marshal(content)
+		payload, _ := json.Marshal(stub.respond(body))
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":0,"model":"test-model","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":%s}}]}`, payload)
 	}))
@@ -182,15 +184,27 @@ func newCapturingStub(t *testing.T) *capturingStub {
 	return stub
 }
 
-func (s *capturingStub) captured() []string {
+func (s *llmStub) captured() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.bodies...)
 }
 
+// newCapturingStub answers every request with a fixed message, except the
+// planner which it answers with the files its prompt listed.
+func newCapturingStub(t *testing.T) *llmStub {
+	t.Helper()
+	return newLLMStub(t, func(body string) string {
+		if strings.Contains(body, "meaningful atomic commits") {
+			return planFromPrompt(body)
+		}
+		return `{"title":"feat(cli): initial commit","bullets":["Change the files"],"explanation":"Changes the files."}`
+	})
+}
+
 // emptyIndexFixture is a repository with two changed files and nothing staged, so
 // the run takes the file-level path and asks the planner once.
-func emptyIndexFixture(t *testing.T) (*capturingStub, string) {
+func emptyIndexFixture(t *testing.T) (*llmStub, string) {
 	t.Helper()
 	stub := newCapturingStub(t)
 	dir := newGitRepo(t)
@@ -205,27 +219,27 @@ func emptyIndexFixture(t *testing.T) (*capturingStub, string) {
 	return stub, dir
 }
 
-// TestCommitCmd_StagedBoundary_EmptyIndexMatchesDevelop is the parity check: with
+// TestCommitCmd_StagedBoundary_EmptyIndexMatchesBaseline is the parity check: with
 // nothing staged, this branch must commit the same content, exit the same way,
-// print the same envelope, and send the same prompts as develop.
-func TestCommitCmd_StagedBoundary_EmptyIndexMatchesDevelop(t *testing.T) {
-	develop := developBinary(t)
-	args := func(stub *capturingStub) []string {
+// print the same envelope, and send the same prompts as baseline.
+func TestCommitCmd_StagedBoundary_EmptyIndexMatchesBaseline(t *testing.T) {
+	baseline := baselineBinary(t)
+	args := func(stub *llmStub) []string {
 		return []string{"commit", "--api-key", "test-key", "--base-url", stub.server.URL,
 			"--model", "test-model", "-o", "json"}
 	}
 
-	developStub, developDir := emptyIndexFixture(t)
-	developOut, developErr, developCode := runBinary(t, develop, developDir, args(developStub)...)
+	baselineStub, baselineDir := emptyIndexFixture(t)
+	baselineOut, baselineErr, baselineCode := runBinary(t, baseline, baselineDir, args(baselineStub)...)
 
 	branchStub, branchDir := emptyIndexFixture(t)
 	branchOut, branchErr, branchCode := runBinary(t, agentBin, branchDir, args(branchStub)...)
 
-	if developCode != branchCode {
-		t.Fatalf("exit codes differ: develop %d, branch %d\n%s\n%s", developCode, branchCode, developErr, branchErr)
+	if baselineCode != branchCode {
+		t.Fatalf("exit codes differ: baseline %d, branch %d\n%s\n%s", baselineCode, branchCode, baselineErr, branchErr)
 	}
-	if developSubjects, branchSubjects := commitSubjects(t, developDir), commitSubjects(t, branchDir); strings.Join(developSubjects, "|") != strings.Join(branchSubjects, "|") {
-		t.Fatalf("commit subjects differ:\ndevelop %v\nbranch  %v", developSubjects, branchSubjects)
+	if baselineSubjects, branchSubjects := commitSubjects(t, baselineDir), commitSubjects(t, branchDir); strings.Join(baselineSubjects, "|") != strings.Join(branchSubjects, "|") {
+		t.Fatalf("commit subjects differ:\nbaseline %v\nbranch  %v", baselineSubjects, branchSubjects)
 	}
 
 	normalize := func(raw string) string {
@@ -249,24 +263,24 @@ func TestCommitCmd_StagedBoundary_EmptyIndexMatchesDevelop(t *testing.T) {
 		out, _ := json.Marshal(envelope)
 		return string(out)
 	}
-	if normalize(developOut) != normalize(branchOut) {
-		t.Fatalf("the JSON envelope differs:\ndevelop %s\nbranch  %s", normalize(developOut), normalize(branchOut))
+	if normalize(baselineOut) != normalize(branchOut) {
+		t.Fatalf("the JSON envelope differs:\nbaseline %s\nbranch  %s", normalize(baselineOut), normalize(branchOut))
 	}
 
 	// The prompts must match too, so a comparison of commits is not the only
 	// evidence: the same run has to ask the model the same questions.
-	developBodies, branchBodies := developStub.captured(), branchStub.captured()
-	if len(developBodies) != len(branchBodies) {
-		t.Fatalf("the runs sent %d and %d requests", len(developBodies), len(branchBodies))
+	baselineBodies, branchBodies := baselineStub.captured(), branchStub.captured()
+	if len(baselineBodies) != len(branchBodies) {
+		t.Fatalf("the runs sent %d and %d requests", len(baselineBodies), len(branchBodies))
 	}
-	for i := range developBodies {
-		left := strings.ReplaceAll(developBodies[i], developDir, "")
+	for i := range baselineBodies {
+		left := strings.ReplaceAll(baselineBodies[i], baselineDir, "")
 		right := strings.ReplaceAll(branchBodies[i], branchDir, "")
 		if left != right {
-			t.Fatalf("request %d differs:\ndevelop %s\nbranch  %s", i+1, left, right)
+			t.Fatalf("request %d differs:\nbaseline %s\nbranch  %s", i+1, left, right)
 		}
 	}
-	t.Logf("empty index: %d identical request(s), identical subjects, identical envelope, exit %d", len(developBodies), branchCode)
+	t.Logf("empty index: %d identical request(s), identical subjects, identical envelope, exit %d", len(baselineBodies), branchCode)
 }
 
 // TestCommitCmd_StagedBoundary_DryRunPreviewsAndRestores proves the preview shows
@@ -323,27 +337,14 @@ func TestCommitCmd_StagedBoundary_DryRunPreviewsAndRestores(t *testing.T) {
 	}
 }
 
-// planRespectingStub answers the planner the way the prompt asks: the staged files
-// form the first group and the unstaged files the next, and each message names the
-// file its own diff covers. It exists so a comparison between two builds measures
-// the flow rather than a stub that groups everything into one commit.
-type planRespectingStub struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	bodies []string
-}
-
-func newPlanRespectingStub(t *testing.T) *planRespectingStub {
+// newPlanRespectingStub answers the planner the way the prompt asks: the staged
+// files form the first group and the unstaged files the next, and each message
+// names the file its own diff covers. It exists so a comparison between two
+// builds measures the flow rather than a stub that groups everything into one
+// commit.
+func newPlanRespectingStub(t *testing.T) *llmStub {
 	t.Helper()
-	stub := &planRespectingStub{}
-	stub.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		body := string(raw)
-		stub.mu.Lock()
-		stub.bodies = append(stub.bodies, body)
-		stub.mu.Unlock()
-
-		var content string
+	return newLLMStub(t, func(body string) string {
 		if strings.Contains(body, "meaningful atomic commits") {
 			staged, unstaged := promptSections(body)
 			var groups []string
@@ -354,16 +355,10 @@ func newPlanRespectingStub(t *testing.T) *planRespectingStub {
 				quoted, _ := json.Marshal(files)
 				groups = append(groups, fmt.Sprintf(`{"files":%s,"title":"feat(cli): group","bullets":["Group the files"],"explanation":"Groups the files."}`, quoted))
 			}
-			content = fmt.Sprintf(`{"groups":[%s]}`, strings.Join(groups, ","))
-		} else {
-			content = fmt.Sprintf(`{"title":"feat(cli): change %s","bullets":["Change it"],"explanation":"Changes it."}`, diffFile(body))
+			return fmt.Sprintf(`{"groups":[%s]}`, strings.Join(groups, ","))
 		}
-		payload, _ := json.Marshal(content)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"id":"x","object":"chat.completion","created":0,"model":"test-model","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":%s}}]}`, payload)
-	}))
-	t.Cleanup(stub.server.Close)
-	return stub
+		return fmt.Sprintf(`{"title":"feat(cli): change %s","bullets":["Change it"],"explanation":"Changes it."}`, diffFile(body))
+	})
 }
 
 // promptSections reads the staged and unstaged file lists the prompt printed. The
@@ -406,14 +401,14 @@ func diffFile(body string) string {
 	return match[1]
 }
 
-// TestCommitCmd_StagedBoundary_WholeFileStagedMatchesDevelop is the case that
+// TestCommitCmd_StagedBoundary_WholeFileStagedMatchesBaseline is the case that
 // earlier looked like it always gains a commit: the index holds a complete file
 // change and other files are loose. With a planner that groups what the prompt
 // asked, both builds must make the same commits.
-func TestCommitCmd_StagedBoundary_WholeFileStagedMatchesDevelop(t *testing.T) {
-	develop := developBinary(t)
+func TestCommitCmd_StagedBoundary_WholeFileStagedMatchesBaseline(t *testing.T) {
+	baseline := baselineBinary(t)
 
-	fixture := func(t *testing.T) (*planRespectingStub, string) {
+	fixture := func(t *testing.T) (*llmStub, string) {
 		t.Helper()
 		stub := newPlanRespectingStub(t)
 		dir := newGitRepo(t)
@@ -429,23 +424,23 @@ func TestCommitCmd_StagedBoundary_WholeFileStagedMatchesDevelop(t *testing.T) {
 		return stub, dir
 	}
 
-	args := func(stub *planRespectingStub) []string {
+	args := func(stub *llmStub) []string {
 		return []string{"commit", "--api-key", "test-key", "--base-url", stub.server.URL,
 			"--model", "test-model", "-o", "json"}
 	}
 
-	developStub, developDir := fixture(t)
-	developOut, developErr, developCode := runBinary(t, develop, developDir, args(developStub)...)
+	baselineStub, baselineDir := fixture(t)
+	baselineOut, baselineErr, baselineCode := runBinary(t, baseline, baselineDir, args(baselineStub)...)
 
 	branchStub, branchDir := fixture(t)
 	branchOut, branchErr, branchCode := runBinary(t, agentBin, branchDir, args(branchStub)...)
 
-	if developCode != branchCode {
-		t.Fatalf("exit codes differ: develop %d, branch %d\n%s\n%s", developCode, branchCode, developErr, branchErr)
+	if baselineCode != branchCode {
+		t.Fatalf("exit codes differ: baseline %d, branch %d\n%s\n%s", baselineCode, branchCode, baselineErr, branchErr)
 	}
-	developSubjects, branchSubjects := commitSubjects(t, developDir), commitSubjects(t, branchDir)
-	if strings.Join(developSubjects, "|") != strings.Join(branchSubjects, "|") {
-		t.Fatalf("commit subjects differ:\ndevelop %v\nbranch  %v", developSubjects, branchSubjects)
+	baselineSubjects, branchSubjects := commitSubjects(t, baselineDir), commitSubjects(t, branchDir)
+	if strings.Join(baselineSubjects, "|") != strings.Join(branchSubjects, "|") {
+		t.Fatalf("commit subjects differ:\nbaseline %v\nbranch  %v", baselineSubjects, branchSubjects)
 	}
 	normalize := func(raw string) string {
 		var envelope map[string]any
@@ -467,9 +462,9 @@ func TestCommitCmd_StagedBoundary_WholeFileStagedMatchesDevelop(t *testing.T) {
 		out, _ := json.Marshal(envelope)
 		return string(out)
 	}
-	if normalize(developOut) != normalize(branchOut) {
-		t.Fatalf("the JSON envelope differs:\ndevelop %s\nbranch  %s", normalize(developOut), normalize(branchOut))
+	if normalize(baselineOut) != normalize(branchOut) {
+		t.Fatalf("the JSON envelope differs:\nbaseline %s\nbranch  %s", normalize(baselineOut), normalize(branchOut))
 	}
-	t.Logf("whole-file staged: develop and branch both made %d commit(s): %v", len(developSubjects), developSubjects)
-	t.Logf("requests: develop %d, branch %d", len(developStub.bodies), len(branchStub.bodies))
+	t.Logf("whole-file staged: baseline and this tree both made %d commit(s): %v", len(baselineSubjects), baselineSubjects)
+	t.Logf("requests: baseline %d, this tree %d", len(baselineStub.bodies), len(branchStub.bodies))
 }

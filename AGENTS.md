@@ -25,7 +25,7 @@ go test ./application/... -run TestCommitService_NoStagedChanges
 gofmt -w ./...
 ```
 
-**e2e tests**: `TestMain` builds the `git-agent` binary once, then all tests invoke it as a subprocess. After any source change, re-run `go test ./e2e/...` — the stale binary will not reflect changes.
+**e2e tests**: `TestMain` builds the `git-agent` binary once, then all tests invoke it as a subprocess. After any source change, re-run `go test ./e2e/...` — the stale binary will not reflect changes. The staged-boundary parity tests also build a pinned pre-fix revision from git history; a shallow checkout without `fetch-depth: 0` silently skips those comparisons.
 
 ## Testing Guidelines & CI
 
@@ -112,3 +112,4 @@ Enforced via pre-tool hook (`conventional` mode validates against this repo's ow
 - Body lines ≤72 characters
 - Branches mirror commit types: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/`
 - Before opening a pull request, run `make build`, `make test`, and `gofmt -l .`; CI also performs cgo-free cross-compilation for release targets.
+- Publish only the exact branch named in the request, from a non-detached HEAD with `origin` present; never push `main`, `master`, `develop`, or `production` directly, and treat a rejected push as a reportable failure (no force-push, amend, or remote swap).

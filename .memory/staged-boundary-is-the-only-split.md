@@ -1,6 +1,6 @@
 ---
 name: staged-boundary-is-the-only-split
-description: a run commits the index content first and exactly; it reports multi-region files and never infers a region split
+description: a run commits the index content first and exactly and never infers a region split; multi-region files are reported, and more than three affected files collapse to one bounded warning with per-file detail under `--verbose`
 type: decision
 ---
 
@@ -22,12 +22,21 @@ commit carried the loose region too.
 HEAD is the index is excluded from the remainder, so a fully staged path is never
 handed to the file-level flow twice: a run whose index holds complete file changes
 makes the commits it made before this fix, and only a path staged in part is
-committed in two parts. A file whose change covers two or
-more anchored regions is reported on `WarnWriter` (wired to stderr with or
-without a terminal), naming the regions and `git add -p`. Never infer a boundary,
-never rebuild content, and never call `StageFiles` for a path the index already
-holds a decision about. Every diff shown to the model goes through
-`preparedForModel`, so the staged path keeps the filter and both caps.
+committed in two parts.
+
+A file whose change covers two or more anchored regions is reported on
+`WarnWriter` (wired to stderr with or without a terminal). Up to three such files
+are each named on the warning stream with their region count, headings, and a
+`git add -p <file>` command. More than three produce one bounded warning line with
+the count, up to three example paths, and one concrete `git add -p` command; a
+non-verbose run appends a hint to rerun with `--verbose`, which writes every
+per-file line after the summary and omits the hint. Region headings are capped at
+three per file; the thresholds are `maxDetailedRegionFiles` and
+`maxRegionHeadings`, both 3.
+
+Never infer a boundary, never rebuild content, and never call `StageFiles` for a
+path the index already holds a decision about. Every diff shown to the model goes
+through `preparedForModel`, so the staged path keeps the filter and both caps.
 
 An attempt to infer regions instead (a hunk parser, applier, region ledger and
 two tunable settings, about 1447 production lines) was measured against real
