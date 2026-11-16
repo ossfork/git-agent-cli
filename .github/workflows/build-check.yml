@@ -18,14 +18,14 @@ permissions:
 jobs:
   cgo-free-build:
     name: CGO_ENABLED=0 build and test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The staged-boundary parity tests build a pinned pre-fix revision.
           fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
 

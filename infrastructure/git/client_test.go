@@ -79,13 +79,46 @@ func TestGitUnquote(t *testing.T) {
 
 // runGit invokes git with the given args inside dir. Test helper that fails the
 // test on non-zero exit so setup failures surface immediately.
+//
+// The helper hides ambient identity so a fixture that forgot its own user.name
+// or user.email fails here instead of passing on a developer machine and
+// failing on a CI runner with no global git configuration.
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	cmd.Env = hermeticGitEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+}
+
+// hermeticGitEnv returns the process environment with author identity and git
+// configuration overrides removed, then disables identity auto-detection. A
+// fixture commit must get its identity from the repository's local config.
+func hermeticGitEnv() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch {
+		case key == "GIT_AUTHOR_NAME", key == "GIT_AUTHOR_EMAIL",
+			key == "GIT_COMMITTER_NAME", key == "GIT_COMMITTER_EMAIL",
+			key == "GIT_CONFIG_COUNT", key == "GIT_CONFIG_GLOBAL",
+			key == "GIT_CONFIG_SYSTEM", key == "GIT_CONFIG_NOSYSTEM",
+			key == "GIT_CONFIG_PARAMETERS", key == "EMAIL",
+			strings.HasPrefix(key, "GIT_CONFIG_KEY_"),
+			strings.HasPrefix(key, "GIT_CONFIG_VALUE_"):
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=user.useConfigOnly",
+		"GIT_CONFIG_VALUE_0=true",
+	)
 }
 
 // gitOutput invokes git inside dir and returns its stdout, failing the test on
@@ -125,6 +158,8 @@ func newUnbornNestedRepo(t *testing.T, dir string) {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
 	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
 }
 
 // TestClient_CommitLog_CapsPerCommitFiles asserts that a single mega-commit
@@ -759,5 +794,64 @@ func TestParseNameStatus(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRunGit_IgnoresAmbientAuthorIdentity locks the git test helper to the
+// repository-local identity. CI runners have no global git identity, and a
+// developer machine may have a different one; neither may change what a fixture
+// commits.
+func TestRunGit_IgnoresAmbientAuthorIdentity(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalConfig, []byte("[user]\n\tname = Global Author\n\temail = global@example.com\n"), 0o644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.name")
+	t.Setenv("GIT_CONFIG_VALUE_0", "Config Author")
+	t.Setenv("GIT_AUTHOR_NAME", "Ambient Author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "Ambient Committer")
+	t.Setenv("GIT_COMMITTER_EMAIL", "ambient@example.com")
+
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write f.txt: %v", err)
+	}
+	runGit(t, dir, "add", "f.txt")
+	runGit(t, dir, "commit", "-q", "-m", "fixture")
+
+	if got := strings.TrimSpace(gitOutput(t, dir, "log", "-1", "--format=%an <%ae>")); got != "Test <test@example.com>" {
+		t.Fatalf("fixture commit used ambient identity %q", got)
+	}
+}
+
+// TestRunGit_RejectsCommitWithoutLocalIdentity proves the hermetic helper does
+// not let a fixture borrow the developer's identity when its own repository
+// has none. CI runners have no global identity, so this failure must happen
+// locally rather than only on CI.
+func TestRunGit_RejectsCommitWithoutLocalIdentity(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q")
+	t.Setenv("GIT_AUTHOR_NAME", "Ambient Author")
+	t.Setenv("GIT_AUTHOR_EMAIL", "ambient@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "Ambient Committer")
+	t.Setenv("GIT_COMMITTER_EMAIL", "ambient@example.com")
+
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatalf("write f.txt: %v", err)
+	}
+	runGit(t, dir, "add", "f.txt")
+
+	cmd := exec.Command("git", "commit", "-q", "-m", "fixture")
+	cmd.Dir = dir
+	cmd.Env = hermeticGitEnv()
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("commit unexpectedly succeeded without local identity:\n%s", out)
 	}
 }
